@@ -325,45 +325,70 @@ class FleetImporter(Processor):
                 f"Please upgrade your Fleet server to a supported version."
             )
 
-        # Upload to Fleet
-        self.output("Uploading package to Fleet…")
-        upload_info = self._fleet_upload_package(
-            fleet_api_base,
-            fleet_token,
-            pkg_path,
-            software_title,
-            version,
-            team_id,
-            self_service,
-            automatic_install,
-            labels_include_any,
-            labels_exclude_any,
-            install_script,
-            uninstall_script,
-            pre_install_query,
-            post_install_script,
+        # Check if package already exists in Fleet
+        self.output(
+            f"Checking if {software_title} {version} already exists in Fleet..."
         )
-        if not upload_info:
-            raise ProcessorError("Fleet package upload failed; no data returned")
+        existing_package = self._check_existing_package(
+            fleet_api_base, fleet_token, team_id, software_title, version
+        )
 
-        # Check for graceful exit case (409 Conflict)
-        if upload_info.get("package_exists"):
+        if existing_package:
             self.output(
-                "Package already exists in Fleet. Exiting gracefully without GitOps operations."
+                f"Package {software_title} {version} already exists in Fleet. "
+                f"Will ensure hash is in GitOps repo."
             )
-            # Set minimal output variables for graceful exit
-            self.env["fleet_title_id"] = None
-            self.env["fleet_installer_id"] = None
-            self.env["git_branch"] = ""
-            self.env["pull_request_url"] = ""
-            return
+            # Use the existing package info instead of uploading
+            hash_sha256 = existing_package.get("hash_sha256")
+            # We don't have title_id/installer_id from this API, set to None
+            title_id = None
+            installer_id = None
+            returned_version = version
+            skip_upload = True
+        else:
+            self.output("Package not found in Fleet, proceeding with upload...")
+            skip_upload = False
 
-        software_package = upload_info.get("software_package", {})
-        title_id = software_package.get("title_id")
-        installer_id = software_package.get("installer_id")
-        hash_sha256 = software_package.get("hash_sha256")
-        # Use our version, not Fleet's returned version which may be incorrect
-        returned_version = version
+        # Upload to Fleet only if not already exists
+        if not skip_upload:
+            self.output("Uploading package to Fleet…")
+            upload_info = self._fleet_upload_package(
+                fleet_api_base,
+                fleet_token,
+                pkg_path,
+                software_title,
+                version,
+                team_id,
+                self_service,
+                automatic_install,
+                labels_include_any,
+                labels_exclude_any,
+                install_script,
+                uninstall_script,
+                pre_install_query,
+                post_install_script,
+            )
+            if not upload_info:
+                raise ProcessorError("Fleet package upload failed; no data returned")
+
+            # Check for graceful exit case (409 Conflict)
+            if upload_info.get("package_exists"):
+                self.output(
+                    "Package already exists in Fleet. Exiting gracefully without GitOps operations."
+                )
+                # Set minimal output variables for graceful exit
+                self.env["fleet_title_id"] = None
+                self.env["fleet_installer_id"] = None
+                self.env["git_branch"] = ""
+                self.env["pull_request_url"] = ""
+                return
+
+            software_package = upload_info.get("software_package", {})
+            title_id = software_package.get("title_id")
+            installer_id = software_package.get("installer_id")
+            hash_sha256 = software_package.get("hash_sha256")
+            # Use our version, not Fleet's returned version which may be incorrect
+            returned_version = version
 
         # Prepare repo in a temp dir
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -534,6 +559,60 @@ class FleetImporter(Processor):
             # If we can't parse the version, assume it's supported to avoid blocking
             return True
 
+    def _check_existing_package(
+        self,
+        fleet_api_base: str,
+        fleet_token: str,
+        team_id: int,
+        software_title: str,
+        version: str,
+    ) -> dict | None:
+        """Query Fleet API to check if a package version already exists.
+
+        Returns a dict with package info if it exists, None otherwise.
+        The dict includes: version, hash_sha256 if the version matches.
+        """
+        try:
+            # URL encode the software title for the query parameter
+            query_param = urllib.parse.quote(software_title)
+            url = f"{fleet_api_base}/api/v1/fleet/software/titles?available_for_install=true&team_id={team_id}&query={query_param}"
+            headers = {
+                "Authorization": f"Bearer {fleet_token}",
+                "Accept": "application/json",
+            }
+            req = urllib.request.Request(url, headers=headers)
+
+            with urllib.request.urlopen(req, timeout=FLEET_VERSION_TIMEOUT) as resp:
+                if resp.getcode() == 200:
+                    data = json.loads(resp.read().decode())
+                    software_titles = data.get("software_titles", [])
+
+                    # Look for exact title match
+                    for title in software_titles:
+                        if title.get("name") == software_title:
+                            # Check if there's a software_package with matching version
+                            sw_package = title.get("software_package")
+                            if sw_package and sw_package.get("version") == version:
+                                self.output(
+                                    f"Found existing package: {software_title} {version}"
+                                )
+                                return {
+                                    "version": sw_package.get("version"),
+                                    "hash_sha256": title.get("hash_sha256"),
+                                    "package_name": sw_package.get("name"),
+                                }
+
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            json.JSONDecodeError,
+            KeyError,
+        ) as e:
+            # If query fails, log and continue with upload
+            self.output(f"Warning: Could not check for existing package: {e}")
+
+        return None
+
     def _get_fleet_version(self, fleet_api_base: str, fleet_token: str) -> str:
         """Query Fleet API to get the server version.
 
@@ -574,8 +653,8 @@ class FleetImporter(Processor):
         software_title: str,
         version: str,
         slug: str,
-        title_id: int,
-        installer_id: int,
+        title_id: int | None,
+        installer_id: int | None,
         team_yaml_prefix: str,
         pkg_yaml_name: str,
         self_service: bool,
@@ -593,9 +672,12 @@ class FleetImporter(Processor):
         lines = [
             f"### {software_title} {version}",
             "",
-            f"- Fleet title ID: `{title_id}`",
-            f"- Fleet installer ID: `{installer_id}`",
         ]
+
+        if title_id is not None:
+            lines.append(f"- Fleet title ID: `{title_id}`")
+        if installer_id is not None:
+            lines.append(f"- Fleet installer ID: `{installer_id}`")
 
         if slug:
             lines.append(f"- Software slug: `{slug}`")
