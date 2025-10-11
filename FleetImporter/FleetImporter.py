@@ -646,12 +646,11 @@ class FleetImporter(Processor):
         Returns a dict with package info if it exists, None otherwise.
         The dict includes: version, hash_sha256 if the version matches.
 
-        Uses two-phase check:
-        1. Query software titles to find matching title
-        2. If found, query the specific title detail to get all versions
+        The API response includes a versions array with all uploaded versions.
+        We check if our version exists in that array.
         """
         try:
-            # Phase 1: Search for the software title
+            # Search for the software title
             query_param = urllib.parse.quote(software_title)
             search_url = f"{fleet_api_base}/api/v1/fleet/software/titles?available_for_install=true&team_id={team_id}&query={query_param}"
             headers = {
@@ -669,99 +668,90 @@ class FleetImporter(Processor):
                         f"Found {len(software_titles)} software title(s) matching '{software_title}'"
                     )
 
-                    # Look for exact title match
+                    # Look for title match - try exact match first, then case-insensitive, then fuzzy
+                    matching_title = None
                     for title in software_titles:
                         title_name = title.get("name", "")
-                        title_id = title.get("id")
-
-                        if title_name == software_title and title_id:
+                        # Exact match (preferred)
+                        if title_name == software_title:
+                            matching_title = title
                             self.output(
-                                f"Found exact match for '{software_title}' (title_id: {title_id})"
+                                f"Found exact match for '{software_title}' (title_id: {title.get('id')})"
                             )
-
-                            # Phase 2: Get detailed info for this specific title to check versions
-                            # This gives us ALL versions uploaded for this title
-                            detail_url = f"{fleet_api_base}/api/v1/fleet/software/titles/{title_id}?team_id={team_id}&available_for_install=true"
-                            detail_req = urllib.request.Request(
-                                detail_url, headers=headers
+                            break
+                        # Case-insensitive match as fallback
+                        elif title_name.lower() == software_title.lower():
+                            matching_title = title
+                            self.output(
+                                f"Found case-insensitive match: '{title_name}' for '{software_title}' (title_id: {title.get('id')})"
                             )
+                            break
 
-                            try:
-                                with urllib.request.urlopen(
-                                    detail_req, timeout=FLEET_VERSION_TIMEOUT
-                                ) as detail_resp:
-                                    if detail_resp.getcode() == 200:
-                                        detail_data = json.loads(
-                                            detail_resp.read().decode()
-                                        )
-                                        software_title_detail = detail_data.get(
-                                            "software_title", {}
-                                        )
-
-                                        # Check the currently available package
-                                        sw_package = software_title_detail.get(
-                                            "software_package"
-                                        )
-                                        if sw_package:
-                                            pkg_version = sw_package.get("version", "")
-                                            self.output(
-                                                f"Available package version: '{pkg_version}' (comparing to '{version}')"
-                                            )
-
-                                            if pkg_version == version:
-                                                # Try to get hash from multiple possible locations
-                                                hash_sha256 = sw_package.get(
-                                                    "hash_sha256"
-                                                ) or software_title_detail.get(
-                                                    "hash_sha256"
-                                                )
-
-                                                self.output(
-                                                    f"Package {software_title} {version} already exists in Fleet"
-                                                )
-                                                return {
-                                                    "version": pkg_version,
-                                                    "hash_sha256": hash_sha256,
-                                                    "package_name": sw_package.get(
-                                                        "name"
-                                                    ),
-                                                }
-
-                                        # Also check versions array if available
-                                        versions = software_title_detail.get(
-                                            "versions", []
-                                        )
-                                        if versions:
-                                            self.output(
-                                                f"Checking {len(versions)} version(s) in detail"
-                                            )
-                                            for ver in versions:
-                                                ver_string = ver.get("version", "")
-                                                if ver_string == version:
-                                                    self.output(
-                                                        f"Package {software_title} {version} found in versions list"
-                                                    )
-                                                    return {
-                                                        "version": ver_string,
-                                                        "hash_sha256": ver.get(
-                                                            "hash_sha256"
-                                                        ),
-                                                        "package_name": software_title,
-                                                    }
-                            except (
-                                urllib.error.HTTPError,
-                                urllib.error.URLError,
-                            ) as detail_err:
+                    # If no exact match, try fuzzy matching (e.g., "Zoom" matches "zoom.us", "Caffeine" matches "Caffeine.app")
+                    if not matching_title and software_titles:
+                        for title in software_titles:
+                            title_name = title.get("name", "")
+                            # Check if search term is contained in title name or vice versa (case-insensitive)
+                            search_lower = software_title.lower()
+                            title_lower = title_name.lower()
+                            if (
+                                search_lower in title_lower
+                                or title_lower in search_lower
+                            ):
+                                matching_title = title
                                 self.output(
-                                    f"Warning: Could not fetch title detail (ID {title_id}): {detail_err}"
+                                    f"Found fuzzy match: '{title_name}' for '{software_title}' (title_id: {title.get('id')})"
                                 )
-                                # Fall through to continue checking other titles
-                        else:
-                            # Log non-matching titles for debugging
-                            if title_name:
+                                break
+
+                    if not matching_title:
+                        # No exact or case-insensitive match - log what we found for debugging
+                        if software_titles:
+                            for title in software_titles:
                                 self.output(
-                                    f"Skipping non-matching title: '{title_name}'"
+                                    f"No match found - searched for '{software_title}', found '{title.get('name', '')}'"
                                 )
+                        return None
+
+                    # Check if our version exists in the versions array
+                    versions = matching_title.get("versions", [])
+                    if versions:
+                        self.output(
+                            f"Checking {len(versions)} version(s) for '{matching_title.get('name')}'"
+                        )
+                        for ver in versions:
+                            ver_string = ver.get("version", "")
+                            if ver_string == version:
+                                # Hash is at the title level, not version level
+                                hash_sha256 = matching_title.get("hash_sha256")
+                                self.output(
+                                    f"Package {software_title} {version} already exists in Fleet (hash: {hash_sha256[:16] + '...' if hash_sha256 else 'none'})"
+                                )
+                                return {
+                                    "version": ver_string,
+                                    "hash_sha256": hash_sha256,
+                                    "package_name": software_title,
+                                }
+
+                    # Check the currently available software_package as well
+                    sw_package = matching_title.get("software_package")
+                    if sw_package:
+                        pkg_version = sw_package.get("version", "")
+                        if pkg_version == version:
+                            hash_sha256 = matching_title.get("hash_sha256")
+                            self.output(
+                                f"Package {software_title} {version} already exists in Fleet as current package (hash: {hash_sha256[:16] + '...' if hash_sha256 else 'none'})"
+                            )
+                            return {
+                                "version": pkg_version,
+                                "hash_sha256": hash_sha256,
+                                "package_name": sw_package.get("name", software_title),
+                            }
+
+                    # Version not found in this title
+                    self.output(
+                        f"Version {version} not found for '{matching_title.get('name')}'"
+                    )
 
         except (
             urllib.error.HTTPError,
