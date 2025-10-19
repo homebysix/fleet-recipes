@@ -324,9 +324,6 @@ class FleetImporter(Processor):
             package_yaml_suffix = self.env.get(
                 "package_yaml_suffix", DEFAULT_PACKAGE_YAML_SUFFIX
             )
-            team_yaml_prefix = self.env.get(
-                "team_yaml_package_path_prefix", DEFAULT_TEAM_YAML_PREFIX
-            )
             github_repo = self.env.get("github_repo") or self._derive_github_repo(
                 git_repo_url
             )
@@ -361,7 +358,6 @@ class FleetImporter(Processor):
             author_email = ""
             software_dir = ""
             package_yaml_suffix = ""
-            team_yaml_prefix = ""
             github_repo = ""
             github_token = ""
             pr_labels = []
@@ -397,8 +393,12 @@ class FleetImporter(Processor):
                 f"Package {software_title} {version} already exists in Fleet. "
                 f"Will ensure hash is in GitOps repo."
             )
-            # Use the existing package info instead of uploading
-            hash_sha256 = existing_package.get("hash_sha256")
+            # Calculate hash from local package file instead of using Fleet API response
+            # Fleet API only returns hash for the current version, not for specific versions
+            hash_sha256 = self._calculate_file_sha256(pkg_path)
+            self.output(
+                f"Calculated SHA-256 hash from local file: {hash_sha256[:16]}..."
+            )
             # We don't have title_id/installer_id from this API, set to None
             title_id = None
             installer_id = None
@@ -561,19 +561,18 @@ class FleetImporter(Processor):
             # Push
             self._git(["push", "--set-upstream", "origin", branch_name], cwd=repo_dir)
 
+            # Scan all software YAML files in the branch to generate comprehensive PR body
+            all_packages = self._scan_software_packages(sw_dir, package_yaml_suffix)
+
         # Prepare PR title and body for shared-branch workflow
         pr_title = "Software updates from AutoPkg"
         pr_body = self._pr_body_shared(
-            software_title,
-            returned_version,
-            software_slug,
-            title_id,
-            installer_id,
-            team_yaml_prefix,
-            pkg_yaml_path.name,
-            self_service,
-            labels_include_any,
-            labels_exclude_any,
+            all_packages=all_packages,
+            latest_package={
+                "title": software_title,
+                "version": returned_version,
+                "slug": software_slug,
+            },
         )
 
         # Open or update PR (shared mode always enabled)
@@ -601,6 +600,55 @@ class FleetImporter(Processor):
         self.output(f"PR opened: {pr_url}")
 
     # ------------------- helpers -------------------
+
+    def _calculate_file_sha256(self, file_path: Path) -> str:
+        """Calculate SHA-256 hash of a file.
+
+        Args:
+            file_path: Path to the file to hash
+
+        Returns:
+            Lowercase hexadecimal SHA-256 hash string
+        """
+        sha256_hash = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            # Read in chunks to handle large files efficiently
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
+
+    def _scan_software_packages(
+        self, software_dir: Path, suffix: str
+    ) -> list[dict[str, str]]:
+        """Scan software directory and return list of all packages.
+
+        Args:
+            software_dir: Path to the directory containing software YAML files
+            suffix: File suffix to look for (e.g., '.yml')
+
+        Returns:
+            List of dicts with keys: name, version, filename
+        """
+        packages = []
+        if not software_dir.exists():
+            return packages
+
+        for yaml_file in sorted(software_dir.glob(f"*{suffix}")):
+            try:
+                data = self._read_yaml(yaml_file)
+                if data and "name" in data and "version" in data:
+                    packages.append(
+                        {
+                            "name": data["name"],
+                            "version": str(data["version"]),
+                            "filename": yaml_file.name,
+                        }
+                    )
+            except Exception:
+                # Skip files that can't be parsed
+                continue
+
+        return packages
 
     def _slugify(self, text: str) -> str:
         # keep it boring; Git path and branch friendly
@@ -908,90 +956,39 @@ class FleetImporter(Processor):
         return "\n".join(lines)
 
     def _pr_body_shared(
-        self,
-        software_title: str,
-        version: str,
-        slug: str,
-        title_id: int | None,
-        installer_id: int | None,
-        team_yaml_prefix: str,
-        pkg_yaml_name: str,
-        self_service: bool,
-        labels_include_any: list[str],
-        labels_exclude_any: list[str],
+        self, all_packages: list[dict[str, str]], latest_package: dict[str, str]
     ) -> str:
         """Compose PR body for shared branch mode with all software updates.
 
-        In shared mode, multiple packages are added to the same PR, so we show
-        a summary of this specific package that was just added.
+        Args:
+            all_packages: List of all packages in the branch (from _scan_software_packages)
+            latest_package: The package that was just added (keys: title, version, slug)
+
+        Returns:
+            Formatted PR body in markdown
         """
 
         lines = [
             "## AutoPkg Software Updates",
             "",
             "This PR contains software package updates from AutoPkg. "
-            "All packages in this PR are already uploaded to Fleet.",
-            "",
-            "### Latest Update",
-            "",
-            f"**{software_title} {version}** was just added to this PR.",
+            "All packages in this PR are already uploaded to Fleet and ready to deploy.",
             "",
         ]
 
-        if title_id is not None:
-            lines.append(f"- Fleet title ID: `{title_id}`")
-        if installer_id is not None:
-            lines.append(f"- Fleet installer ID: `{installer_id}`")
+        # List all packages in this PR
+        if all_packages:
+            lines.extend(
+                [
+                    "### 📦 Packages in This PR",
+                    "",
+                ]
+            )
 
-        if slug:
-            lines.append(f"- Software slug: `{slug}`")
-            if "/" in slug:
-                changelog = f"https://github.com/{slug}/releases/tag/{version}"
-                lines.append(f"- [Changelog]({changelog})")
+            for pkg in all_packages:
+                lines.append(f"- **{pkg['name']}** `{pkg['version']}`")
 
-        # Add team YAML instructions
-        lines.extend(
-            [
-                "",
-                "---",
-                "",
-                "### 📋 Team YAML Update Required",
-                "",
-                "To deploy the software in this PR, add the package references to your team YAML:",
-                "",
-                "**For this package:**",
-                "",
-                "```yaml",
-            ]
-        )
-
-        # Build the YAML entry for this specific package
-        yaml_entry = f"- path: {team_yaml_prefix}{pkg_yaml_name}"
-        lines.append(yaml_entry)
-
-        if self_service:
-            lines.append("  self_service: true")
-        if labels_include_any:
-            lines.append("  labels_include_any:")
-            for label in labels_include_any:
-                lines.append(f"    - {label}")
-        if labels_exclude_any:
-            lines.append("  labels_exclude_any:")
-            for label in labels_exclude_any:
-                lines.append(f"    - {label}")
-
-        lines.extend(
-            [
-                "```",
-                "",
-                "---",
-                "",
-                "### ✅ Benefits of Single-PR Workflow",
-                "",
-                "This PR aggregates multiple software updates to prevent GitOps from deleting packages before approval. "
-                "All packages in this branch are safe from deletion until the PR is merged or closed.",
-            ]
-        )
+            lines.append("")
 
         return "\n".join(lines)
 
