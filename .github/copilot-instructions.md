@@ -292,4 +292,5 @@ git status && git log --oneline -5
 - [AutoPkg Documentation](https://github.com/autopkg/autopkg/wiki) - Official AutoPkg wiki and documentation
 - [AutoPkg Source Code](https://github.com/autopkg/autopkg) - AutoPkg main repository and source code
 - Fleet GitOps YAML software docs: https://fleetdm.com/docs/configuration/yaml-files#software
-- Fleet API documentation for software management integration
+- Fleet API documentation for software management integration: https://fleetdm.com/docs/rest-api/rest-api#software
+- Fleet source code: https://github.com/fleetdm/fleet

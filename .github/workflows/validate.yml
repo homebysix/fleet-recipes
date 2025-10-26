@@ -221,11 +221,9 @@ jobs:
         
         print(f'\n🎯 Total unique environment variables: {len(all_env_vars)}')
         
-        # Check for required environment variables
+        # Check for required environment variables (GitOps variables removed)
         required_vars = [
-            'FLEET_API_BASE', 'FLEET_API_TOKEN', 'FLEET_TEAM_ID',
-            'FLEET_GITOPS_REPO_URL', 'FLEET_GITOPS_GITHUB_TOKEN', 
-            'FLEET_TEAM_YAML_PATH'
+            'FLEET_API_BASE', 'FLEET_API_TOKEN', 'FLEET_TEAM_ID'
         ]
         
         missing_required = [var for var in required_vars if var not in all_env_vars]
