@@ -39,24 +39,24 @@ AutoPkg [supports both XML (plist) and YAML recipe formats](https://github.com/a
 
 ### 1. Install AutoPkg
 
-\`\`\`bash
+```bash
 # Using Homebrew (recommended)
 brew install autopkg
 
 # Verify installation
 autopkg version
-\`\`\`
+```
 
 ### 2. Add Recipe Repositories
 
-\`\`\`bash
+```bash
 # Add common AutoPkg recipe repos
 autopkg repo-add https://github.com/autopkg/recipes.git
 autopkg repo-add https://github.com/autopkg/homebysix-recipes.git
 
 # Add this repo for FleetImporter processor
 autopkg repo-add https://github.com/kitzy/fleetimporter.git
-\`\`\`
+```
 
 ### 3. Configure Environment Variables
 
@@ -64,17 +64,17 @@ You can configure Fleet API credentials in two ways:
 
 **Option A: Environment Variables (for CI/CD)**
 
-\`\`\`bash
+```bash
 export FLEET_API_BASE="https://fleet.example.com"
 export FLEET_API_TOKEN="your-fleet-api-token"
 export FLEET_TEAM_ID="1"
-\`\`\`
+```
 
 **Option B: AutoPkg Preferences (for local use)**
 
 Set preferences in AutoPkg's plist file:
 
-\`\`\`bash
+```bash
 # Set Fleet API credentials
 defaults write com.github.autopkg FLEET_API_BASE "https://fleet.example.com"
 defaults write com.github.autopkg FLEET_API_TOKEN "your-fleet-api-token"
@@ -84,7 +84,7 @@ defaults write com.github.autopkg FLEET_TEAM_ID "1"
 defaults read com.github.autopkg FLEET_API_BASE
 defaults read com.github.autopkg FLEET_API_TOKEN
 defaults read com.github.autopkg FLEET_TEAM_ID
-\`\`\`
+```
 
 This stores the values in `~/Library/Preferences/com.github.autopkg.plist` so you don't need to export environment variables for each terminal session.
 
@@ -96,7 +96,7 @@ This stores the values in `~/Library/Preferences/com.github.autopkg.plist` so yo
 
 Here's a minimal recipe that downloads and uploads Google Chrome to Fleet:
 
-\`\`\`yaml
+```yaml
 Description: 'Builds GoogleChrome.pkg and uploads to Fleet'
 Identifier: com.github.kitzy.fleet.GoogleChrome
 Input:
@@ -113,11 +113,11 @@ Process:
     team_id: '%FLEET_TEAM_ID%'
     self_service: true
   Processor: FleetImporter
-\`\`\`
+```
 
 ### Running a Recipe
 
-\`\`\`bash
+```bash
 # Run a single recipe
 autopkg run GoogleChrome.fleet.recipe.yaml
 
@@ -125,11 +125,11 @@ autopkg run GoogleChrome.fleet.recipe.yaml
 autopkg run -v GoogleChrome.fleet.recipe.yaml
 
 # Override variables
-autopkg run GoogleChrome.fleet.recipe.yaml \\
-  -k FLEET_API_BASE="https://fleet.example.com" \\
-  -k FLEET_API_TOKEN="your-token" \\
+autopkg run GoogleChrome.fleet.recipe.yaml \
+  -k FLEET_API_BASE="https://fleet.example.com" \
+  -k FLEET_API_TOKEN="your-token" \
   -k FLEET_TEAM_ID="1"
-\`\`\`
+```
 
 ---
 
@@ -174,7 +174,7 @@ autopkg run GoogleChrome.fleet.recipe.yaml \\
 
 ### Self-Service Only for Specific Labels
 
-\`\`\`yaml
+```yaml
 Process:
 - Arguments:
     pkg_path: '%pkg_path%'
@@ -188,11 +188,11 @@ Process:
       - workstations
       - developers
   Processor: FleetImporter
-\`\`\`
+```
 
 ### Automatic Installation with Exclusions
 
-\`\`\`yaml
+```yaml
 Process:
 - Arguments:
     pkg_path: '%pkg_path%'
@@ -206,11 +206,11 @@ Process:
       - servers
       - kiosk
   Processor: FleetImporter
-\`\`\`
+```
 
 ### With Custom Scripts
 
-\`\`\`yaml
+```yaml
 Process:
 - Arguments:
     pkg_path: '%pkg_path%'
@@ -230,7 +230,7 @@ Process:
       # Verify installation
       echo "Verifying..."
   Processor: FleetImporter
-\`\`\`
+```
 
 ---
 
@@ -269,11 +269,11 @@ If the proactive check misses something (network issue, timing, stale data), Fle
 
 The processor requires Fleet v4.74.0 or higher. If you see version-related errors:
 
-\`\`\`bash
+```bash
 # Check your Fleet version
-curl -H "Authorization: Bearer \$FLEET_API_TOKEN" \\
-  "\$FLEET_API_BASE/api/v1/fleet/version"
-\`\`\`
+curl -H "Authorization: Bearer $FLEET_API_TOKEN" \
+  "$FLEET_API_BASE/api/v1/fleet/version"
+```
 
 ### Authentication Errors
 
@@ -294,7 +294,7 @@ Fleet's API only allows either \`labels_include_any\` OR \`labels_exclude_any\`,
 
 This processor follows AutoPkg's strict code style requirements:
 
-\`\`\`bash
+```bash
 # Validate Python syntax
 python3 -m py_compile FleetImporter/FleetImporter.py
 
@@ -306,7 +306,7 @@ python3 -m isort --check-only FleetImporter/FleetImporter.py
 
 # Run linter
 python3 -m flake8 FleetImporter/FleetImporter.py
-\`\`\`
+```
 
 All checks must pass before code can be contributed to AutoPkg repositories.
 
@@ -314,7 +314,7 @@ All checks must pass before code can be contributed to AutoPkg repositories.
 
 Test the processor with a sample recipe:
 
-\`\`\`bash
+```bash
 # Create test environment
 export FLEET_API_BASE="https://fleet.example.com"
 export FLEET_API_TOKEN="your-test-token"
@@ -322,7 +322,7 @@ export FLEET_TEAM_ID="1"
 
 # Run test recipe with verbose output
 autopkg run -vv GoogleChrome.fleet.recipe.yaml
-\`\`\`
+```
 
 ---
 
