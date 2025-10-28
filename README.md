@@ -133,18 +133,214 @@ autopkg run GoogleChrome.fleet.recipe.yaml \
 
 ---
 
+## GitOps Mode
+
+FleetImporter supports GitOps mode as an alternative to direct Fleet API uploads. In GitOps mode, packages are uploaded to S3 and made available via CloudFront, and a pull request is automatically created in your GitOps repository with the software definition.
+
+### Why GitOps Mode?
+
+GitOps mode provides a workaround for [Fleet issue #34137](https://github.com/fleetdm/fleet/issues/34137), where Fleet's GitOps synchronization deletes newly uploaded packages before their corresponding PRs are merged. By uploading to S3 and defining the software in YAML from the start, the package is never deleted by Fleet's GitOps sync.
+
+### Requirements for GitOps Mode
+
+**Additional Dependencies:**
+```bash
+# Install boto3 for AWS S3 operations
+pip install boto3 PyYAML
+
+# Verify AWS credentials are configured
+aws configure list
+
+# Or set AWS credentials via environment variables
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_DEFAULT_REGION="us-east-1"
+```
+
+**AWS Permissions Required:**
+- `s3:PutObject` - Upload new packages
+- `s3:ListBucket` - List existing versions for cleanup
+- `s3:DeleteObject` - Remove old versions based on retention policy
+
+**GitHub Permissions Required:**
+- GitHub personal access token with `repo` scope
+- Write access to the GitOps repository
+
+### GitOps Mode Environment Variables
+
+```bash
+# AWS S3 and CloudFront
+export AWS_S3_BUCKET="my-fleet-packages"
+export AWS_CLOUDFRONT_DOMAIN="cdn.example.com"
+
+# GitOps repository
+export GITOPS_REPO_URL="https://github.com/org/fleet-gitops.git"
+export GITOPS_SOFTWARE_DIR="lib/macos/software"  # Default, can be omitted
+export GITOPS_TEAM_YAML_PATH="teams/team-name.yml"
+
+# GitHub authentication
+export GITHUB_TOKEN="your-github-token"
+```
+
+### GitOps Recipe Example
+
+```yaml
+Description: 'Builds GoogleChrome.pkg, uploads to S3, and creates GitOps PR'
+Identifier: com.github.kitzy.fleet.gitops.GoogleChrome
+Input:
+  NAME: Google Chrome
+  GITOPS_SOFTWARE_DIR: lib/macos/software
+  GITOPS_TEAM_YAML_PATH: teams/workstations.yml
+MinimumVersion: '2.0'
+ParentRecipe: com.github.autopkg.pkg.googlechrome
+Process:
+- Arguments:
+    pkg_path: '%pkg_path%'
+    software_title: '%NAME%'
+    version: '%version%'
+    gitops_mode: true
+    aws_s3_bucket: '%AWS_S3_BUCKET%'
+    aws_cloudfront_domain: '%AWS_CLOUDFRONT_DOMAIN%'
+    gitops_repo_url: '%GITOPS_REPO_URL%'
+    gitops_software_dir: '%GITOPS_SOFTWARE_DIR%'
+    gitops_team_yaml_path: '%GITOPS_TEAM_YAML_PATH%'
+    github_token: '%GITHUB_TOKEN%'
+    s3_retention_versions: 3
+    self_service: true
+    labels_include_any:
+      - workstations
+  Processor: FleetImporter
+```
+
+This makes it easy to override the paths when running recipes:
+```bash
+autopkg run GoogleChrome.fleet.gitops.recipe.yaml \
+  -k GITOPS_TEAM_YAML_PATH="teams/engineering.yml"
+```
+
+### GitOps Mode Arguments
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `gitops_mode` | No | `false` | Enable GitOps mode (S3 upload + PR creation) |
+| `aws_s3_bucket` | Yes* | - | S3 bucket name for package storage |
+| `aws_cloudfront_domain` | Yes* | - | CloudFront distribution domain (e.g., cdn.example.com) |
+| `gitops_repo_url` | Yes* | - | GitOps repository URL |
+| `gitops_software_dir` | No | `lib/macos/software` | Directory for package YAMLs within GitOps repo |
+| `gitops_team_yaml_path` | Yes* | - | Path to team YAML file (e.g., teams/team-name.yml) |
+| `github_token` | Yes* | - | GitHub personal access token |
+| `s3_retention_versions` | No | `3` | Number of old versions to retain per software title |
+
+*Required when `gitops_mode` is `true`
+
+### GitOps Mode Output Variables
+
+| Variable | Description |
+|----------|-------------|
+| `cloudfront_url` | CloudFront URL for the uploaded package |
+| `pull_request_url` | URL of the created pull request |
+| `git_branch` | Name of the Git branch created for the PR |
+| `hash_sha256` | SHA-256 hash of uploaded package |
+
+### GitOps Workflow
+
+1. **Calculate package hash**: SHA-256 hash is calculated for the package
+2. **Clone GitOps repository**: Repository is cloned to a temporary directory
+3. **Check S3 for existing package**: Checks if package with same title and version already exists
+4. **Upload to S3**: Package is uploaded to `s3://bucket/software/<Title>/<Title>-<Version>.pkg` (skipped if already exists)
+5. **Construct CloudFront URL**: URL is generated from S3 path and CloudFront domain
+6. **Create package YAML**: Software package YAML file is created in `lib/macos/software/<slug>.yml` with URL and hash
+7. **Update team YAML**: Team YAML file (e.g., `teams/team-name.yml`) is updated to reference the package
+8. **Create Git branch**: Branch is created with format `autopkg/<software-slug>-<version>`
+9. **Commit and push**: Both YAML files are committed and pushed to the remote repository
+10. **Create pull request**: PR is created via GitHub API
+11. **Clean up S3**: Old package versions are deleted based on retention policy
+12. **Clean up temp directory**: Temporary clone is removed
+
+**Note**: The processor detects duplicate packages in S3 by filename (title + version) and skips re-uploading if the package already exists. This makes the workflow idempotent and avoids unnecessary S3 uploads. The YAML update and PR creation still proceed even if the package exists, allowing recipe configuration changes to be deployed.
+
+### GitOps Repository Structure
+
+The processor creates/updates files following Fleet's [GitOps YAML structure](https://fleetdm.com/docs/configuration/yaml-files#software):
+
+```
+fleet-gitops/
+├── lib/
+│   └── macos/
+│       └── software/
+│           ├── google-chrome.yml      # Package definition (URL, hash, scripts)
+│           └── firefox.yml
+└── teams/
+    ├── workstations.yml               # Team config (references packages)
+    └── no-team.yml
+```
+
+**Package YAML** (`lib/macos/software/google-chrome.yml`):
+```yaml
+- url: https://cdn.example.com/software/Google Chrome/Google Chrome-131.0.0.0.pkg
+  hash_sha256: abc123...
+  install_script:
+    path: ../scripts/chrome-install.sh  # Optional
+  uninstall_script:
+    path: ../scripts/chrome-uninstall.sh  # Optional
+```
+
+**Team YAML** (`teams/workstations.yml`):
+```yaml
+software:
+  packages:
+    - path: ../lib/macos/software/google-chrome.yml
+      self_service: true
+      labels_include_any:
+        - workstations
+```
+
+### S3 Package Structure
+
+Packages are organized in S3 following AutoPkg's standard naming convention:
+
+```
+s3://my-fleet-packages/
+  software/
+    Google Chrome/
+      Google Chrome-131.0.0.0.pkg
+      Google Chrome-130.0.0.0.pkg
+    Firefox/
+      Firefox-120.0.0.pkg
+      Firefox-119.0.1.pkg
+```
+
+The naming pattern is: `software/<Title>/<Title>-<Version>.<ext>`
+
+### S3 Retention Policy
+
+The `s3_retention_versions` parameter controls how many old versions are kept:
+
+- **Default**: Keep the 3 most recent versions
+- **Safety rule**: Never delete the only remaining version
+- **Cleanup timing**: After successfully uploading a new version
+- **Version sorting**: Uses semantic versioning when available, falls back to string sort
+
+### Error Handling in GitOps Mode
+
+- **Clone fails**: Workflow aborts before S3 upload (fail early)
+- **S3 upload succeeds but PR fails**: CloudFront URL is logged for manual YAML update
+- **Cleanup always runs**: Temporary directory is removed even on error
+
+---
+
 ## Configuration
 
-### Required Arguments
+### Required Arguments (Direct Mode)
 
 | Argument | Description |
 |----------|-------------|
-| \`pkg_path\` | Path to the built .pkg file (usually from parent recipe) |
-| \`software_title\` | Human-readable software title (e.g., "Firefox.app") |
-| \`version\` | Software version string |
-| \`fleet_api_base\` | Fleet base URL (e.g., https://fleet.example.com) |
-| \`fleet_api_token\` | Fleet API token with software management permissions |
-| \`team_id\` | Fleet team ID to upload the package to |
+| `pkg_path` | Path to the built .pkg file (usually from parent recipe) |
+| `software_title` | Human-readable software title (e.g., "Firefox.app") |
+| `version` | Software version string |
+| `fleet_api_base` | Fleet base URL (e.g., https://fleet.example.com) |
+| `fleet_api_token` | Fleet API token with software management permissions |
+| `team_id` | Fleet team ID to upload the package to |
 
 ### Optional Arguments
 
@@ -160,13 +356,22 @@ autopkg run GoogleChrome.fleet.recipe.yaml \
 | \`pre_install_query\` | \`""\` | Pre-install osquery SQL condition |
 | \`post_install_script\` | \`""\` | Post-install script body |
 
-### Output Variables
+### Output Variables (Direct Mode)
 
 | Variable | Description |
 |----------|-------------|
-| \`fleet_title_id\` | Fleet software title ID (may be None for duplicates) |
-| \`fleet_installer_id\` | Fleet installer ID (may be None for duplicates) |
-| \`hash_sha256\` | SHA-256 hash of uploaded package |
+| `fleet_title_id` | Fleet software title ID (may be None for duplicates) |
+| `fleet_installer_id` | Fleet installer ID (may be None for duplicates) |
+| `hash_sha256` | SHA-256 hash of uploaded package |
+
+### Output Variables (GitOps Mode)
+
+| Variable | Description |
+|----------|-------------|
+| `cloudfront_url` | CloudFront URL for the uploaded package |
+| `pull_request_url` | URL of the created pull request |
+| `git_branch` | Name of the Git branch created for the PR |
+| `hash_sha256` | SHA-256 hash of uploaded package |
 
 ---
 

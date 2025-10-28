@@ -13,13 +13,29 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import yaml
 from autopkglib import Processor, ProcessorError
+
+# Try to import boto3 for S3 operations (optional dependency)
+try:
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    HAS_BOTO3 = True
+except ImportError:
+    HAS_BOTO3 = False
+    boto3 = None
+    BotoCoreError = Exception
+    ClientError = Exception
 
 # Constants for improved readability
 DEFAULT_PLATFORM = "darwin"
@@ -61,18 +77,54 @@ class FleetImporter(Processor):
             "default": DEFAULT_PLATFORM,
             "description": "Platform (darwin|windows|linux|ios|ipados). Default: darwin",
         },
-        # --- Fleet API ---
+        # --- Fleet API (required for direct mode, optional for GitOps mode) ---
         "fleet_api_base": {
-            "required": True,
-            "description": "Fleet base URL, e.g., https://fleet.example.com",
+            "required": False,
+            "description": "Fleet base URL, e.g., https://fleet.example.com (required for direct mode)",
         },
         "fleet_api_token": {
-            "required": True,
-            "description": "Fleet API token (Bearer).",
+            "required": False,
+            "description": "Fleet API token (Bearer) (required for direct mode).",
         },
         "team_id": {
-            "required": True,
-            "description": "Fleet team ID to attach the uploaded package to.",
+            "required": False,
+            "description": "Fleet team ID to attach the uploaded package to (required for direct mode).",
+        },
+        # --- GitOps mode ---
+        "gitops_mode": {
+            "required": False,
+            "default": False,
+            "description": "Enable GitOps mode: upload to S3 and create PR instead of direct Fleet upload.",
+        },
+        "aws_s3_bucket": {
+            "required": False,
+            "description": "S3 bucket name for package storage (required for GitOps mode).",
+        },
+        "aws_cloudfront_domain": {
+            "required": False,
+            "description": "CloudFront distribution domain (required for GitOps mode), e.g., cdn.example.com",
+        },
+        "gitops_repo_url": {
+            "required": False,
+            "description": "GitOps repository URL (required for GitOps mode), e.g., https://github.com/org/fleet-gitops.git",
+        },
+        "gitops_software_dir": {
+            "required": False,
+            "default": "lib/macos/software",
+            "description": "Directory for software package YAMLs within GitOps repo (default: lib/macos/software).",
+        },
+        "gitops_team_yaml_path": {
+            "required": False,
+            "description": "Path to team YAML file within GitOps repo (required for GitOps mode), e.g., teams/team-name.yml",
+        },
+        "github_token": {
+            "required": False,
+            "description": "GitHub personal access token for cloning and creating PRs (required for GitOps mode).",
+        },
+        "s3_retention_versions": {
+            "required": False,
+            "default": 3,
+            "description": "Number of old versions to retain per software title in S3 (default: 3).",
         },
         # --- Fleet deployment options ---
         "self_service": {
@@ -123,9 +175,28 @@ class FleetImporter(Processor):
         "hash_sha256": {
             "description": "SHA-256 hash of the uploaded package, as returned by Fleet."
         },
+        "cloudfront_url": {
+            "description": "CloudFront URL for the uploaded package (GitOps mode only)."
+        },
+        "pull_request_url": {
+            "description": "URL of the created pull request (GitOps mode only)."
+        },
+        "git_branch": {
+            "description": "Name of the Git branch created for the PR (GitOps mode only)."
+        },
     }
 
     def main(self):
+        # Check if GitOps mode is enabled
+        gitops_mode = bool(self.env.get("gitops_mode", False))
+
+        if gitops_mode:
+            self._run_gitops_workflow()
+        else:
+            self._run_direct_upload_workflow()
+
+    def _run_direct_upload_workflow(self):
+        """Run the original direct upload workflow to Fleet API."""
         # Validate inputs
         pkg_path = Path(self.env["pkg_path"]).expanduser().resolve()
         if not pkg_path.is_file():
@@ -232,7 +303,699 @@ class FleetImporter(Processor):
         if hash_sha256:
             self.env["hash_sha256"] = hash_sha256
 
+    def _run_gitops_workflow(self):
+        """Run the GitOps workflow: upload to S3, update YAML, create PR."""
+        # Check for boto3
+        if not HAS_BOTO3:
+            raise ProcessorError(
+                "GitOps mode requires boto3. Install with: pip install boto3"
+            )
+
+        # Validate inputs
+        pkg_path = Path(self.env["pkg_path"]).expanduser().resolve()
+        if not pkg_path.is_file():
+            raise ProcessorError(f"pkg_path not found: {pkg_path}")
+
+        software_title = self.env["software_title"].strip()
+        version = self.env["version"].strip()
+
+        # GitOps mode required parameters
+        aws_s3_bucket = self.env.get("aws_s3_bucket")
+        aws_cloudfront_domain = self.env.get("aws_cloudfront_domain")
+        gitops_repo_url = self.env.get("gitops_repo_url")
+        gitops_software_dir = self.env.get("gitops_software_dir", "lib/macos/software")
+        gitops_team_yaml_path = self.env.get("gitops_team_yaml_path")
+        github_token = self.env.get("github_token")
+        s3_retention_versions = int(self.env.get("s3_retention_versions", 3))
+
+        # Validate required GitOps parameters
+        if not all(
+            [
+                aws_s3_bucket,
+                aws_cloudfront_domain,
+                gitops_repo_url,
+                gitops_team_yaml_path,
+                github_token,
+            ]
+        ):
+            raise ProcessorError(
+                "GitOps mode requires: aws_s3_bucket, aws_cloudfront_domain, "
+                "gitops_repo_url, gitops_team_yaml_path, and github_token"
+            )
+
+        # Fleet deployment options
+        self_service = bool(self.env.get("self_service", True))
+        automatic_install = bool(self.env.get("automatic_install", False))
+        labels_include_any = list(self.env.get("labels_include_any", []))
+        labels_exclude_any = list(self.env.get("labels_exclude_any", []))
+        install_script = self.env.get("install_script", "")
+        uninstall_script = self.env.get("uninstall_script", "")
+        pre_install_query = self.env.get("pre_install_query", "")
+        post_install_script = self.env.get("post_install_script", "")
+
+        # Calculate SHA-256 hash before uploading
+        self.output(f"Calculating SHA-256 hash for {pkg_path.name}...")
+        hash_sha256 = self._calculate_file_sha256(pkg_path)
+        self.output(f"SHA-256: {hash_sha256}")
+
+        # Clone GitOps repository first (fail early if this doesn't work)
+        self.output(f"Cloning GitOps repository: {gitops_repo_url}")
+        temp_dir = None
+        try:
+            temp_dir = self._clone_gitops_repo(gitops_repo_url, github_token)
+            self.output(f"Repository cloned to: {temp_dir}")
+
+            # Upload package to S3
+            self.output(f"Uploading package to S3 bucket: {aws_s3_bucket}")
+            s3_key = self._upload_to_s3(
+                aws_s3_bucket, software_title, version, pkg_path
+            )
+            self.output(f"Package uploaded to S3: {s3_key}")
+
+            # Construct CloudFront URL
+            cloudfront_url = self._construct_cloudfront_url(
+                aws_cloudfront_domain, s3_key
+            )
+            self.output(f"CloudFront URL: {cloudfront_url}")
+            self.env["cloudfront_url"] = cloudfront_url
+            self.env["hash_sha256"] = hash_sha256
+
+            # Clean up old versions in S3
+            self.output(
+                f"Cleaning up old S3 versions (retaining {s3_retention_versions} most recent)..."
+            )
+            self._cleanup_old_s3_versions(
+                aws_s3_bucket, software_title, version, s3_retention_versions
+            )
+
+            # Create software package YAML file
+            self.output(f"Creating software package YAML in {gitops_software_dir}")
+            package_yaml_path = self._create_software_package_yaml(
+                temp_dir,
+                gitops_software_dir,
+                software_title,
+                cloudfront_url,
+                hash_sha256,
+                install_script,
+                uninstall_script,
+                pre_install_query,
+                post_install_script,
+            )
+
+            # Update team YAML file to reference the package
+            self.output(f"Updating team YAML: {gitops_team_yaml_path}")
+            team_yaml_path = Path(temp_dir) / gitops_team_yaml_path
+            self._update_team_yaml(
+                team_yaml_path,
+                package_yaml_path,
+                software_title,
+                self_service,
+                automatic_install,
+                labels_include_any,
+                labels_exclude_any,
+            )
+
+            # Create Git branch, commit, and push
+            branch_name = f"autopkg/{self._slugify(software_title)}-{version}"
+            self.output(f"Creating Git branch: {branch_name}")
+            self._commit_and_push(
+                temp_dir,
+                branch_name,
+                software_title,
+                version,
+                package_yaml_path,
+                team_yaml_path,
+            )
+            self.env["git_branch"] = branch_name
+
+            # Create pull request
+            self.output("Creating pull request...")
+            pr_url = self._create_pull_request(
+                gitops_repo_url, github_token, branch_name, software_title, version
+            )
+            self.output(f"Pull request created: {pr_url}")
+            self.env["pull_request_url"] = pr_url
+
+        except Exception as e:
+            # If we have a CloudFront URL, log it so it can be manually added
+            if "cloudfront_url" in self.env:
+                self.output(
+                    f"ERROR: GitOps workflow failed, but package was uploaded to: {self.env['cloudfront_url']}"
+                )
+            raise ProcessorError(f"GitOps workflow failed: {e}")
+        finally:
+            # Always clean up temporary directory
+            if temp_dir and Path(temp_dir).exists():
+                self.output(f"Cleaning up temporary directory: {temp_dir}")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
     # ------------------- helpers -------------------
+
+    def _slugify(self, text: str) -> str:
+        """Convert text to a URL-safe slug.
+
+        Args:
+            text: Text to slugify
+
+        Returns:
+            Lowercase slug with hyphens instead of spaces/special chars
+        """
+        # Convert to lowercase and replace non-alphanumeric with hyphens
+        slug = re.sub(r"[^a-z0-9]+", "-", text.lower())
+        # Remove leading/trailing hyphens
+        return slug.strip("-")
+
+    def _upload_to_s3(
+        self, bucket: str, software_title: str, version: str, pkg_path: Path
+    ) -> str:
+        """Upload package to S3 and return the S3 key.
+
+        Args:
+            bucket: S3 bucket name
+            software_title: Software title for path construction
+            version: Software version for path construction
+            pkg_path: Path to the package file
+
+        Returns:
+            S3 key (path within bucket)
+
+        Raises:
+            ProcessorError: If upload fails
+        """
+        try:
+            s3_client = boto3.client("s3")
+            # Use AutoPkg standard naming: software/Title/Title-Version.pkg
+            extension = pkg_path.suffix
+            s3_key = f"software/{software_title}/{software_title}-{version}{extension}"
+
+            # Check if package already exists in S3
+            try:
+                s3_client.head_object(Bucket=bucket, Key=s3_key)
+                self.output(
+                    f"Package {software_title} {version} already exists in S3 at {s3_key}. Skipping upload."
+                )
+                return s3_key
+            except ClientError as e:
+                # 404 means object doesn't exist, which is expected for new packages
+                if e.response["Error"]["Code"] == "404":
+                    self.output("Package not found in S3, proceeding with upload")
+                else:
+                    # Some other error occurred
+                    raise
+
+            self.output(f"Uploading to s3://{bucket}/{s3_key}")
+            s3_client.upload_file(str(pkg_path), bucket, s3_key)
+            self.output(f"Upload complete: s3://{bucket}/{s3_key}")
+            return s3_key
+        except (ClientError, BotoCoreError) as e:
+            raise ProcessorError(f"S3 upload failed: {e}")
+
+    def _construct_cloudfront_url(self, cloudfront_domain: str, s3_key: str) -> str:
+        """Construct CloudFront URL from S3 key.
+
+        Args:
+            cloudfront_domain: CloudFront distribution domain
+            s3_key: S3 key (path within bucket)
+
+        Returns:
+            Full CloudFront HTTPS URL
+        """
+        # Remove any leading/trailing slashes from domain
+        domain = cloudfront_domain.strip("/")
+        # Ensure s3_key doesn't start with /
+        key = s3_key.lstrip("/")
+        return f"https://{domain}/{key}"
+
+    def _cleanup_old_s3_versions(
+        self,
+        bucket: str,
+        software_title: str,
+        current_version: str,
+        retention_count: int,
+    ):
+        """Clean up old package versions in S3, keeping the N most recent.
+
+        Args:
+            bucket: S3 bucket name
+            software_title: Software title
+            current_version: Current version (just uploaded)
+            retention_count: Number of versions to keep
+
+        Safety rules:
+        - Never delete the only remaining version
+        - Keep the N most recent versions based on version sort
+        """
+        try:
+            s3_client = boto3.client("s3")
+            prefix = f"software/{software_title}/"
+
+            # List all objects for this software title
+            response = s3_client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            if "Contents" not in response:
+                self.output(f"No existing versions found in S3 for {software_title}")
+                return
+
+            # Extract version information from S3 keys
+            # Key format: software/Title/Title-Version.pkg
+            # Parse version from filename
+            import re
+
+            versions = {}
+            for obj in response["Contents"]:
+                key = obj["Key"]
+                # Extract version from filename pattern: Title-Version.pkg
+                # Match: software/Title/Title-Version.ext
+                match = re.search(rf"{re.escape(software_title)}-([^/]+)\.", key)
+                if match:
+                    ver = match.group(1)
+                    if ver not in versions:
+                        versions[ver] = []
+                    versions[ver].append(key)
+
+            self.output(
+                f"Found {len(versions)} version(s) in S3: {list(versions.keys())}"
+            )
+
+            # Safety check: never delete if only one version exists
+            if len(versions) <= 1:
+                self.output("Only one version exists, skipping cleanup")
+                return
+
+            # Sort versions (semantic versioning)
+            try:
+                from packaging import version as pkg_version
+
+                sorted_versions = sorted(
+                    versions.keys(),
+                    key=lambda v: pkg_version.parse(v),
+                    reverse=True,
+                )
+            except Exception:
+                # Fallback to string sort if packaging not available
+                sorted_versions = sorted(versions.keys(), reverse=True)
+
+            # Determine which versions to delete
+            versions_to_keep = sorted_versions[:retention_count]
+            versions_to_delete = [
+                v for v in sorted_versions if v not in versions_to_keep
+            ]
+
+            if not versions_to_delete:
+                self.output(
+                    f"All versions within retention limit ({retention_count}), skipping cleanup"
+                )
+                return
+
+            # Delete old versions
+            for ver in versions_to_delete:
+                for key in versions[ver]:
+                    self.output(f"Deleting old version from S3: {key}")
+                    s3_client.delete_object(Bucket=bucket, Key=key)
+
+            self.output(
+                f"Cleanup complete. Kept versions: {versions_to_keep}, "
+                f"Deleted versions: {versions_to_delete}"
+            )
+
+        except (ClientError, BotoCoreError) as e:
+            # Log error but don't fail the entire workflow
+            self.output(f"Warning: S3 cleanup failed: {e}")
+
+    def _clone_gitops_repo(self, repo_url: str, github_token: str) -> str:
+        """Clone GitOps repository to a temporary directory.
+
+        Args:
+            repo_url: Git repository URL
+            github_token: GitHub personal access token
+
+        Returns:
+            Path to temporary directory containing cloned repo
+
+        Raises:
+            ProcessorError: If clone fails
+        """
+        temp_dir = tempfile.mkdtemp(prefix="fleetimporter-gitops-")
+
+        # Inject token into HTTPS URL for authentication
+        if repo_url.startswith("https://github.com/"):
+            auth_url = repo_url.replace(
+                "https://github.com/", f"https://{github_token}@github.com/"
+            )
+        else:
+            # Assume token can be used as-is
+            auth_url = repo_url
+
+        try:
+            # Clone repository
+            subprocess.run(
+                ["git", "clone", auth_url, temp_dir],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            return temp_dir
+        except subprocess.CalledProcessError as e:
+            # Clean up temp dir on failure
+            if Path(temp_dir).exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            raise ProcessorError(
+                f"Failed to clone GitOps repository: {e.stderr or e.stdout}"
+            )
+
+    def _read_yaml(self, yaml_path: Path) -> dict:
+        """Read and parse YAML file.
+
+        Args:
+            yaml_path: Path to YAML file
+
+        Returns:
+            Parsed YAML data as dict
+
+        Raises:
+            ProcessorError: If file cannot be read or parsed
+        """
+        try:
+            if not yaml_path.exists():
+                # Return empty structure if file doesn't exist
+                return {"software": []}
+            with open(yaml_path, "r") as f:
+                data = yaml.safe_load(f) or {}
+                # Ensure software array exists
+                if "software" not in data:
+                    data["software"] = []
+                return data
+        except (yaml.YAMLError, IOError) as e:
+            raise ProcessorError(f"Failed to read YAML file {yaml_path}: {e}")
+
+    def _write_yaml(self, yaml_path: Path, data: dict):
+        """Write data to YAML file.
+
+        Args:
+            yaml_path: Path to YAML file
+            data: Data to write
+
+        Raises:
+            ProcessorError: If file cannot be written
+        """
+        try:
+            # Ensure parent directory exists
+            yaml_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(yaml_path, "w") as f:
+                yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
+        except (yaml.YAMLError, IOError) as e:
+            raise ProcessorError(f"Failed to write YAML file {yaml_path}: {e}")
+
+    def _create_software_package_yaml(
+        self,
+        repo_dir: str,
+        software_dir: str,
+        software_title: str,
+        cloudfront_url: str,
+        hash_sha256: str,
+        install_script: str,
+        uninstall_script: str,
+        pre_install_query: str,
+        post_install_script: str,
+    ) -> str:
+        """Create software package YAML file in lib/ directory.
+
+        Args:
+            repo_dir: Path to Git repository
+            software_dir: Directory for software YAMLs (e.g., lib/macos/software)
+            software_title: Software title
+            cloudfront_url: CloudFront URL for package
+            hash_sha256: SHA-256 hash of package
+            install_script: Custom install script
+            uninstall_script: Custom uninstall script
+            pre_install_query: Pre-install query
+            post_install_script: Post-install script
+
+        Returns:
+            Relative path to created package YAML file (for use in team YAML)
+
+        Raises:
+            ProcessorError: If YAML creation fails
+        """
+        # Create slugified filename
+        slug = self._slugify(software_title)
+        package_filename = f"{slug}.yml"
+        package_path = Path(repo_dir) / software_dir / package_filename
+
+        # Build package entry (Fleet expects a list with single item)
+        package_entry = {
+            "url": cloudfront_url,
+            "hash_sha256": hash_sha256,
+        }
+
+        # Add optional script paths if provided
+        if install_script:
+            package_entry["install_script"] = {"path": install_script}
+        if uninstall_script:
+            package_entry["uninstall_script"] = {"path": uninstall_script}
+        if pre_install_query:
+            package_entry["pre_install_query"] = {"path": pre_install_query}
+        if post_install_script:
+            package_entry["post_install_script"] = {"path": post_install_script}
+
+        # Package YAML is a list with single entry
+        self._write_yaml(package_path, [package_entry])
+
+        # Return relative path from team YAML to package YAML
+        # E.g., if team YAML is teams/team-name.yml and package is lib/macos/software/chrome.yml
+        # then relative path is ../lib/macos/software/chrome.yml
+        return f"../{software_dir}/{package_filename}"
+
+    def _update_team_yaml(
+        self,
+        team_yaml_path: Path,
+        package_yaml_relative_path: str,
+        software_title: str,
+        self_service: bool,
+        automatic_install: bool,
+        labels_include_any: list,
+        labels_exclude_any: list,
+    ):
+        """Update team YAML file to include software package reference.
+
+        Args:
+            team_yaml_path: Path to team YAML file
+            package_yaml_relative_path: Relative path to package YAML
+            software_title: Software title (for logging)
+            self_service: Self-service flag
+            automatic_install: Automatic install flag (setup_experience in Fleet)
+            labels_include_any: Include labels
+            labels_exclude_any: Exclude labels
+
+        Raises:
+            ProcessorError: If YAML update fails
+        """
+        data = self._read_yaml(team_yaml_path)
+
+        # Ensure software section exists
+        if "software" not in data:
+            data["software"] = {}
+        if "packages" not in data["software"]:
+            data["software"]["packages"] = []
+
+        packages_list = data["software"]["packages"]
+
+        # Find existing entry for this package path
+        existing_entry = None
+        for entry in packages_list:
+            if entry.get("path") == package_yaml_relative_path:
+                existing_entry = entry
+                break
+
+        # Build package reference entry
+        new_entry = {
+            "path": package_yaml_relative_path,
+            "self_service": self_service,
+        }
+
+        # Add optional fields according to Fleet docs
+        if automatic_install:
+            new_entry["setup_experience"] = True
+        if labels_include_any:
+            new_entry["labels_include_any"] = labels_include_any
+        if labels_exclude_any:
+            new_entry["labels_exclude_any"] = labels_exclude_any
+
+        if existing_entry:
+            # Update existing entry
+            self.output(f"Updating existing team entry for {software_title}")
+            existing_entry.update(new_entry)
+        else:
+            # Add new entry
+            self.output(f"Adding new team entry for {software_title}")
+            packages_list.append(new_entry)
+
+        data["software"]["packages"] = packages_list
+        self._write_yaml(team_yaml_path, data)
+
+    def _commit_and_push(
+        self,
+        repo_dir: str,
+        branch_name: str,
+        software_title: str,
+        version: str,
+        package_yaml_path: str,
+        team_yaml_path: str,
+    ):
+        """Create Git branch, commit changes, and push to remote.
+
+        Args:
+            repo_dir: Path to Git repository
+            branch_name: Name of branch to create
+            software_title: Software title for commit message
+            version: Software version for commit message
+            package_yaml_path: Relative path to package YAML file
+            team_yaml_path: Relative path to team YAML file
+
+        Raises:
+            ProcessorError: If Git operations fail
+        """
+        try:
+            git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+            # Create and checkout new branch
+            subprocess.run(
+                ["git", "checkout", "-b", branch_name],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+
+            # Stage both YAML files
+            # Convert relative paths (with ../) to paths relative to repo root
+            # package_yaml_path is like ../lib/macos/software/chrome.yml
+            # team_yaml_path is like Path object to teams/team-name.yml
+            pkg_file = package_yaml_path.replace("../", "")
+            team_file = str(team_yaml_path.relative_to(repo_dir))
+
+            subprocess.run(
+                ["git", "add", pkg_file, team_file],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+
+            # Commit
+            commit_msg = f"Add {software_title} {version}"
+            subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+
+            # Push to remote
+            subprocess.run(
+                ["git", "push", "origin", branch_name],
+                cwd=repo_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=git_env,
+            )
+        except subprocess.CalledProcessError as e:
+            raise ProcessorError(f"Git operation failed: {e.stderr or e.stdout}")
+
+    def _create_pull_request(
+        self,
+        repo_url: str,
+        github_token: str,
+        branch_name: str,
+        software_title: str,
+        version: str,
+    ) -> str:
+        """Create a pull request using GitHub API.
+
+        Args:
+            repo_url: Git repository URL
+            github_token: GitHub personal access token
+            branch_name: Name of branch to create PR from
+            software_title: Software title for PR title
+            version: Software version for PR title
+
+        Returns:
+            URL of created pull request
+
+        Raises:
+            ProcessorError: If PR creation fails
+        """
+        # Parse repository owner and name from URL
+        # Expected format: https://github.com/owner/repo.git
+        match = re.search(r"github\.com[:/]([^/]+)/([^/\.]+)", repo_url)
+        if not match:
+            raise ProcessorError(
+                f"Could not parse GitHub repository from URL: {repo_url}"
+            )
+
+        owner = match.group(1)
+        repo = match.group(2)
+
+        # Construct PR details
+        pr_title = f"Add {software_title} {version}"
+        pr_body = f"""
+## AutoPkg Package Upload
+
+This PR adds a new version of {software_title}.
+
+- **Version**: {version}
+- **Source**: AutoPkg FleetImporter
+- **Branch**: `{branch_name}`
+
+### Changes
+- Updated software definition in GitOps YAML
+- Package uploaded to S3 and available via CloudFront
+
+This PR was automatically generated by the FleetImporter AutoPkg processor.
+""".strip()
+
+        # Create PR using GitHub API
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "title": pr_title,
+            "body": pr_body,
+            "head": branch_name,
+            "base": "main",  # TODO: Make this configurable
+        }
+
+        try:
+            req = urllib.request.Request(
+                api_url,
+                data=json.dumps(data).encode(),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                if resp.getcode() in (200, 201):
+                    response_data = json.loads(resp.read().decode())
+                    pr_url = response_data.get("html_url")
+                    return pr_url
+                else:
+                    raise ProcessorError(
+                        f"GitHub API returned unexpected status: {resp.getcode()}"
+                    )
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode()
+            raise ProcessorError(
+                f"Failed to create pull request: {e.code} {error_body}"
+            )
+        except urllib.error.URLError as e:
+            raise ProcessorError(f"Failed to connect to GitHub API: {e}")
 
     def _calculate_file_sha256(self, file_path: Path) -> str:
         """Calculate SHA-256 hash of a file.
