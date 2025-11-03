@@ -9,6 +9,7 @@ Input:
   SELF_SERVICE: true
   CATEGORIES:
   - Developer tools
+  - Productivity
   ICON: GPGSuite.png
 MinimumVersion: "2.3"
 ParentRecipe: com.github.kitzy.pkg.GPGSuite
