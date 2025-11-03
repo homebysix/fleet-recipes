@@ -21,12 +21,22 @@ FleetImporter extends AutoPkg to integrate with Fleet's software management. It 
 
 Upload packages directly to your Fleet server.
 
-### Required environment variables
+### Required configuration
+
+Set via AutoPkg preferences (recommended):
 
 ```bash
 defaults write com.github.autopkg FLEET_API_BASE "https://fleet.example.com"
 defaults write com.github.autopkg FLEET_API_TOKEN "your-fleet-api-token"
 defaults write com.github.autopkg FLEET_TEAM_ID "1"
+```
+
+Or via environment variables:
+
+```bash
+export FLEET_API_BASE="https://fleet.example.com"
+export FLEET_API_TOKEN="your-fleet-api-token"
+export FLEET_TEAM_ID="1"
 ```
 
 ### Required recipe arguments
@@ -62,10 +72,10 @@ Process:
 
 ```yaml
 Description: "Builds Claude.pkg and uploads to Fleet."
-Identifier: com.github.kitzy.fleet.Claude
+Identifier: com.github.fleet.Claude
 Input:
   NAME: Claude
-MinimumVersion: "2.0"
+MinimumVersion: "2.3"
 ParentRecipe: com.github.kitzy.pkg.Claude
 Process:
 - Arguments:
@@ -79,7 +89,7 @@ Process:
     categories:
     - Developer tools
     icon: Claude.png
-  Processor: com.github.kitzy.FleetImporter/FleetImporter
+  Processor: com.github.FleetImporter/FleetImporter
 ```
 
 ---
@@ -96,11 +106,28 @@ Upload packages to S3 and create GitOps pull requests for Fleet configuration ma
 - CloudFront distribution pointing to the S3 bucket
 - AWS credentials configured (via `~/.aws/credentials` or environment variables)
 
-### Required environment variables
+### Required configuration
+
+Set via AutoPkg preferences (recommended):
+
+```bash
+defaults write com.github.autopkg AWS_S3_BUCKET "my-fleet-packages"
+defaults write com.github.autopkg AWS_CLOUDFRONT_DOMAIN "cdn.example.com"
+defaults write com.github.autopkg AWS_ACCESS_KEY_ID "your-access-key"
+defaults write com.github.autopkg AWS_SECRET_ACCESS_KEY "your-secret-key"
+defaults write com.github.autopkg AWS_DEFAULT_REGION "us-east-1"
+defaults write com.github.autopkg FLEET_GITOPS_REPO_URL "https://github.com/org/fleet-gitops.git"
+defaults write com.github.autopkg FLEET_GITOPS_GITHUB_TOKEN "your-github-token"
+```
+
+Or via environment variables:
 
 ```bash
 export AWS_S3_BUCKET="my-fleet-packages"
 export AWS_CLOUDFRONT_DOMAIN="cdn.example.com"
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_DEFAULT_REGION="us-east-1"
 export FLEET_GITOPS_REPO_URL="https://github.com/org/fleet-gitops.git"
 export FLEET_GITOPS_GITHUB_TOKEN="your-github-token"
 ```
@@ -116,6 +143,9 @@ Process:
     gitops_mode: true
     aws_s3_bucket: "%AWS_S3_BUCKET%"
     aws_cloudfront_domain: "%AWS_CLOUDFRONT_DOMAIN%"
+    aws_access_key_id: "%AWS_ACCESS_KEY_ID%"
+    aws_secret_access_key: "%AWS_SECRET_ACCESS_KEY%"
+    aws_default_region: "%AWS_DEFAULT_REGION%"
     gitops_repo_url: "%FLEET_GITOPS_REPO_URL%"
     gitops_software_dir: "%FLEET_GITOPS_SOFTWARE_DIR%"
     gitops_team_yaml_path: "%FLEET_GITOPS_TEAM_YAML_PATH%"
@@ -130,6 +160,9 @@ All [optional arguments](#optional-recipe-arguments) from direct mode, plus:
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `s3_retention_versions` | integer | `3` | Number of old package versions to retain in S3 |
+| `aws_access_key_id` | string | - | AWS access key ID for S3 operations |
+| `aws_secret_access_key` | string | - | AWS secret access key for S3 operations |
+| `aws_default_region` | string | `us-east-1` | AWS region for S3 operations |
 | `gitops_software_dir` | string | `lib/macos/software` | Directory for software YAML files |
 | `gitops_team_yaml_path` | string | - | Path to team YAML file (e.g., `teams/workstations.yml`) |
 
@@ -137,12 +170,12 @@ All [optional arguments](#optional-recipe-arguments) from direct mode, plus:
 
 ```yaml
 Description: "Builds Claude.pkg, uploads to S3, and creates GitOps PR."
-Identifier: com.github.kitzy.fleet.gitops.Claude
+Identifier: com.github.fleet.gitops.Claude
 Input:
   NAME: Claude
   FLEET_GITOPS_SOFTWARE_DIR: lib/macos/software
   FLEET_GITOPS_TEAM_YAML_PATH: teams/workstations.yml
-MinimumVersion: "2.0"
+MinimumVersion: "2.3"
 ParentRecipe: com.github.kitzy.pkg.Claude
 Process:
 - Arguments:
@@ -152,6 +185,9 @@ Process:
     gitops_mode: true
     aws_s3_bucket: "%AWS_S3_BUCKET%"
     aws_cloudfront_domain: "%AWS_CLOUDFRONT_DOMAIN%"
+    aws_access_key_id: "%AWS_ACCESS_KEY_ID%"
+    aws_secret_access_key: "%AWS_SECRET_ACCESS_KEY%"
+    aws_default_region: "%AWS_DEFAULT_REGION%"
     gitops_repo_url: "%FLEET_GITOPS_REPO_URL%"
     gitops_software_dir: "%FLEET_GITOPS_SOFTWARE_DIR%"
     gitops_team_yaml_path: "%FLEET_GITOPS_TEAM_YAML_PATH%"
@@ -161,7 +197,7 @@ Process:
     categories:
     - Developer tools
     icon: Claude.png
-  Processor: com.github.kitzy.FleetImporter/FleetImporter
+  Processor: com.github.FleetImporter/FleetImporter
 ```
 
 ### GitOps workflow
