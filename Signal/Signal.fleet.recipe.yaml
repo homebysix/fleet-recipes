@@ -11,7 +11,7 @@ Input:
   - Communication
   
   # Optional: Icon file (leave empty for automatic extraction)
-  ICON: Signal.png
+  ICON: ""
 
   # Optional: Custom scripts and queries (leave empty if not needed)
   INSTALL_SCRIPT: ""

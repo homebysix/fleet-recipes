@@ -11,7 +11,7 @@ Input:
   - Productivity
   
   # Optional: Icon file (leave empty for automatic extraction)
-  ICON: Caffeine.png
+  ICON: ""
 
   # Optional: Custom scripts and queries (leave empty if not needed)
   INSTALL_SCRIPT: ""

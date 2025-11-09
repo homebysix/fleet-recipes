@@ -11,7 +11,7 @@ Input:
   - Developer tools
   
   # Optional: Icon file (leave empty for automatic extraction)
-  ICON: Claude.png
+  ICON: ""
 
   # Optional: Custom scripts and queries (leave empty if not needed)
   INSTALL_SCRIPT: ""
