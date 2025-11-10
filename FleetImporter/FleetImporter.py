@@ -669,8 +669,8 @@ class FleetImporter(Processor):
             temp_dir = Path(tempfile.mkdtemp(prefix="fleetimporter-icon-"))
 
             # First, expand the pkg to find the app bundle
+            # Note: pkgutil --expand will create the target directory, so don't create it beforehand
             pkg_expand_dir = temp_dir / "pkg_contents"
-            pkg_expand_dir.mkdir()
 
             self.output(f"Expanding package to find app bundle: {pkg_path.name}")
             result = subprocess.run(
@@ -688,9 +688,78 @@ class FleetImporter(Processor):
 
             # Find .app bundles within the expanded package
             app_bundles = list(pkg_expand_dir.rglob("*.app"))
+
+            # If no .app bundles found directly, check for Payload archives
             if not app_bundles:
                 self.output(
-                    "Warning: No .app bundle found in package. Skipping icon extraction."
+                    "No .app bundle found directly in package. Checking Payload archives..."
+                )
+                payload_files = list(pkg_expand_dir.rglob("Payload"))
+
+                for payload_file in payload_files:
+                    if payload_file.is_file():
+                        self.output(f"Found Payload archive: {payload_file}")
+                        # Extract Payload archive to find .app bundles
+                        payload_extract_dir = temp_dir / "payload_extracted"
+                        payload_extract_dir.mkdir(exist_ok=True)
+
+                        try:
+                            # Try to extract as gzip compressed tar (most common)
+                            result = subprocess.run(
+                                [
+                                    "tar",
+                                    "-xzf",
+                                    str(payload_file),
+                                    "-C",
+                                    str(payload_extract_dir),
+                                ],
+                                capture_output=True,
+                                text=True,
+                            )
+
+                            if result.returncode != 0:
+                                # Try as bzip2 compressed tar
+                                result = subprocess.run(
+                                    [
+                                        "tar",
+                                        "-xjf",
+                                        str(payload_file),
+                                        "-C",
+                                        str(payload_extract_dir),
+                                    ],
+                                    capture_output=True,
+                                    text=True,
+                                )
+
+                            if result.returncode != 0:
+                                # Try as uncompressed tar
+                                result = subprocess.run(
+                                    [
+                                        "tar",
+                                        "-xf",
+                                        str(payload_file),
+                                        "-C",
+                                        str(payload_extract_dir),
+                                    ],
+                                    capture_output=True,
+                                    text=True,
+                                )
+
+                            if result.returncode == 0:
+                                # Search for .app bundles in extracted payload
+                                app_bundles = list(payload_extract_dir.rglob("*.app"))
+                                if app_bundles:
+                                    self.output(
+                                        f"Found {len(app_bundles)} .app bundle(s) in Payload archive"
+                                    )
+                                    break
+                        except Exception as e:
+                            self.output(f"Warning: Could not extract Payload: {e}")
+                            continue
+
+            if not app_bundles:
+                self.output(
+                    "Warning: No .app bundle found in package or Payload archives. Skipping icon extraction."
                 )
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
@@ -760,44 +829,119 @@ class FleetImporter(Processor):
                 self.output(f"Warning: Info.plist not found in {app_bundle.name}")
                 return None
 
-            # Use plutil to read icon file name
+            icon_file = None
+
+            # Try CFBundleIconFile first (legacy .icns approach)
             result = subprocess.run(
                 ["plutil", "-extract", "CFBundleIconFile", "raw", str(info_plist)],
                 capture_output=True,
                 text=True,
             )
 
-            if result.returncode != 0:
-                self.output(
-                    f"Warning: Could not read CFBundleIconFile from Info.plist: {result.stderr}"
+            if result.returncode == 0 and result.stdout.strip():
+                icon_name = result.stdout.strip()
+                # Add .icns extension if not present
+                if not icon_name.endswith(".icns"):
+                    icon_name += ".icns"
+
+                # Find the icon file in the app bundle
+                icon_file = app_bundle / "Contents" / "Resources" / icon_name
+                if not icon_file.exists():
+                    # Try without extension
+                    icon_name_no_ext = icon_name.replace(".icns", "")
+                    icon_file = (
+                        app_bundle
+                        / "Contents"
+                        / "Resources"
+                        / f"{icon_name_no_ext}.icns"
+                    )
+
+                if icon_file.exists():
+                    self.output(f"Found icon file: {icon_file.name}")
+                else:
+                    icon_file = None
+
+            # If CFBundleIconFile not found, try CFBundleIconName (modern asset catalog approach)
+            if not icon_file:
+                result = subprocess.run(
+                    ["plutil", "-extract", "CFBundleIconName", "raw", str(info_plist)],
+                    capture_output=True,
+                    text=True,
                 )
+
+                if result.returncode == 0 and result.stdout.strip():
+                    icon_name = result.stdout.strip()
+                    self.output(
+                        f"App uses asset catalog (CFBundleIconName: {icon_name}). Searching for icon..."
+                    )
+                    resources_dir = app_bundle / "Contents" / "Resources"
+
+                    # First try: Look for .icns files in Resources
+                    icns_files = list(resources_dir.glob("*.icns"))
+                    if icns_files:
+                        icon_file = icns_files[0]
+                        self.output(f"Found icon file: {icon_file.name}")
+
+                    # Second try: Use macOS icon services via Python/Cocoa to extract icon
+                    if not icon_file:
+                        self.output(
+                            "No .icns file found. Attempting to extract icon using macOS icon services..."
+                        )
+                        temp_png = Path(tempfile.gettempdir()) / f"{app_bundle.stem}_icon.png"
+                        try:
+                            # Use Python with Cocoa (PyObjC) to get the app's icon
+                            # This is available in macOS's system Python
+                            import Cocoa
+
+                            workspace = Cocoa.NSWorkspace.sharedWorkspace()
+                            app_icon = workspace.iconForFile_(str(app_bundle))
+
+                            if app_icon:
+                                # Get the largest representation (usually 512x512 or 1024x1024)
+                                tiff_data = app_icon.TIFFRepresentation()
+                                bitmap_rep = Cocoa.NSBitmapImageRep.imageRepWithData_(tiff_data)
+
+                                # Convert to PNG
+                                png_data = bitmap_rep.representationUsingType_properties_(
+                                    Cocoa.NSBitmapImageFileTypePNG, None
+                                )
+
+                                # Write PNG file
+                                png_data.writeToFile_atomically_(str(temp_png), True)
+
+                                if temp_png.exists() and temp_png.stat().st_size > 0:
+                                    icon_file = temp_png
+                                    self.output(
+                                        f"Successfully extracted icon using macOS icon services ({temp_png.stat().st_size} bytes)"
+                                    )
+                                else:
+                                    self.output("Warning: Icon file created but empty")
+                            else:
+                                self.output("Warning: Could not get app icon from macOS")
+
+                        except ImportError:
+                            self.output(
+                                "Warning: PyObjC (Cocoa module) not available. Cannot extract icon from asset catalog."
+                            )
+                        except Exception as e:
+                            self.output(f"Warning: Error extracting icon: {str(e)}")
+                            if temp_png.exists():
+                                temp_png.unlink()
+
+                    if not icon_file:
+                        self.output(
+                            f"Warning: Could not find or extract icon for {app_bundle.name}"
+                        )
+                        return None
+                else:
+                    self.output(
+                        f"Warning: Neither CFBundleIconFile nor CFBundleIconName found in Info.plist for {app_bundle.name}"
+                    )
+                    return None
+
+            if not icon_file or not icon_file.exists():
+                self.output(f"Warning: Icon file not found in {app_bundle.name}")
                 return None
-
-            icon_name = result.stdout.strip()
-            if not icon_name:
-                self.output("Warning: CFBundleIconFile is empty in Info.plist")
-                return None
-
-            # Add .icns extension if not present
-            if not icon_name.endswith(".icns"):
-                icon_name += ".icns"
-
-            # Find the icon file in the app bundle
-            icon_file = app_bundle / "Contents" / "Resources" / icon_name
-            if not icon_file.exists():
-                # Try without extension
-                icon_name_no_ext = icon_name.replace(".icns", "")
-                icon_file = (
-                    app_bundle / "Contents" / "Resources" / f"{icon_name_no_ext}.icns"
-                )
-
-            if not icon_file.exists():
-                self.output(
-                    f"Warning: Icon file not found: {icon_name} in {app_bundle.name}"
-                )
-                return None
-
-            self.output(f"Found icon file: {icon_file.name}")
 
             # Convert .icns to PNG using sips (macOS built-in tool)
             output_png = temp_dir / "icon.png"
