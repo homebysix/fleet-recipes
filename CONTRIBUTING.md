@@ -119,6 +119,40 @@ Only include a manual icon file if automatic extraction is not technically possi
 - Named `<SoftwareName>.png`
 - Referenced in recipe as `ICON: <SoftwareName>.png`
 
+### Custom Scripts
+
+Recipes can include custom install, uninstall, and post-install scripts. For maintainability and readability:
+
+**Use separate script files when:**
+- Script is longer than 3-5 lines
+- Script contains complex logic or multiple operations
+- Script may be reused or referenced by other recipes
+
+**Use inline scripts when:**
+- Script is very short (1-2 lines)
+- Script is simple and self-explanatory
+
+**Script file guidelines:**
+- Store script files in the same vendor directory as the recipe (e.g., `VendorName/uninstall-softwarename.sh`)
+- Use descriptive filenames: `install-<softwarename>.sh`, `uninstall-<softwarename>.sh`, etc.
+- Include a shebang line (`#!/bin/bash`) at the top of the script
+- Add comments explaining what the script does
+- Reference in recipe using relative path: `UNINSTALL_SCRIPT: uninstall-softwarename.sh`
+
+**Example with script file:**
+```yaml
+Input:
+  UNINSTALL_SCRIPT: uninstall-elgato-stream-deck.sh
+```
+
+**Example with inline script (simple case):**
+```yaml
+Input:
+  POST_INSTALL_SCRIPT: |
+    #!/bin/bash
+    echo "Installation complete"
+```
+
 ### YAML Formatting
 
 - Use 2-space indentation
