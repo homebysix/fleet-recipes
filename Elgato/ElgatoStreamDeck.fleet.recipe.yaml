@@ -15,7 +15,7 @@ Input:
 
   # Optional: Custom scripts and queries (leave empty if not needed)
   INSTALL_SCRIPT: ""
-  UNINSTALL_SCRIPT: ""
+  UNINSTALL_SCRIPT: uninstall-elgato-stream-deck.sh
   PRE_INSTALL_QUERY: ""
   POST_INSTALL_SCRIPT: ""
 
