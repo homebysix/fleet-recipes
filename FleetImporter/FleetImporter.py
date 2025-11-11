@@ -1480,24 +1480,33 @@ class FleetImporter(Processor):
             ProcessorError: If clone fails
         """
         temp_dir = tempfile.mkdtemp(prefix="fleetimporter-gitops-")
-
-        # Inject token into HTTPS URL for authentication
-        if repo_url.startswith("https://github.com/"):
-            auth_url = repo_url.replace(
-                "https://github.com/", f"https://{github_token}@github.com/"
-            )
-        else:
-            # Assume token can be used as-is
-            auth_url = repo_url
+        askpass_script = None
 
         try:
-            # Clone repository
+            # Create a temporary GIT_ASKPASS script to provide credentials securely
+            # This avoids embedding tokens in URLs where they could be logged
+            askpass_fd, askpass_script = tempfile.mkstemp(
+                prefix="git-askpass-", suffix=".sh", text=True
+            )
+            os.write(askpass_fd, f'#!/bin/sh\necho "{github_token}"\n'.encode())
+            os.close(askpass_fd)
+            os.chmod(askpass_script, 0o700)
+
+            # Set up minimal environment for git clone
+            git_env = {
+                "GIT_ASKPASS": askpass_script,
+                "GIT_TERMINAL_PROMPT": "0",
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": os.environ.get("HOME", ""),
+            }
+
+            # Clone repository using GIT_ASKPASS for authentication
             subprocess.run(
-                ["git", "clone", auth_url, temp_dir],
+                ["git", "clone", repo_url, temp_dir],
                 check=True,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                env=git_env,
             )
             return temp_dir
         except subprocess.CalledProcessError as e:
@@ -1507,6 +1516,13 @@ class FleetImporter(Processor):
             raise ProcessorError(
                 f"Failed to clone GitOps repository: {e.stderr or e.stdout}"
             )
+        finally:
+            # Clean up the askpass script
+            if askpass_script and os.path.exists(askpass_script):
+                try:
+                    os.unlink(askpass_script)
+                except Exception:
+                    pass  # Best effort cleanup
 
     def _read_yaml(self, yaml_path: Path) -> dict:
         """Read and parse YAML file.
