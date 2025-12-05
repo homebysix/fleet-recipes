@@ -424,7 +424,7 @@ class StyleGuideValidator:
         self_service = input_section.get("self_service")
         if self_service is None:
             self_service = input_section.get("SELF_SERVICE")
-        
+
         categories = input_section.get("categories")
         if categories is None:
             categories = input_section.get("CATEGORIES")
@@ -452,7 +452,7 @@ class StyleGuideValidator:
         labels_include = input_section.get("labels_include_any")
         if labels_include is None:
             labels_include = input_section.get("LABELS_INCLUDE_ANY")
-        
+
         labels_exclude = input_section.get("labels_exclude_any")
         if labels_exclude is None:
             labels_exclude = input_section.get("LABELS_EXCLUDE_ANY")
@@ -517,12 +517,12 @@ class StyleGuideValidator:
 
     def validate_process_arguments(self, recipe_path, args, is_combined):
         """Validate Process section arguments reference Input variables correctly.
-        
+
         Note: As of AutoPkg convention update, lowercase Input variables (self_service,
         automatic_install, etc.) are automatically passed to processors with native types
         preserved. They do NOT need to be in the Arguments section. Only UPPERCASE
         variables that use %VARIABLE% substitution need to be in Arguments.
-        
+
         Legacy recipes may still use %SELF_SERVICE% syntax in Arguments.
         """
         # Check self_service argument - it's OK if not present (auto-passed from Input)
@@ -543,7 +543,10 @@ class StyleGuideValidator:
 
         # Check automatic_install argument - same logic
         automatic_install_arg = args.get("automatic_install")
-        if automatic_install_arg is not None and automatic_install_arg != "%AUTOMATIC_INSTALL%":
+        if (
+            automatic_install_arg is not None
+            and automatic_install_arg != "%AUTOMATIC_INSTALL%"
+        ):
             self.errors.append(
                 f"{recipe_path}: Process argument 'automatic_install' should be '%AUTOMATIC_INSTALL%' or omitted (auto-passed), got '{automatic_install_arg}'"
             )
@@ -551,7 +554,9 @@ class StyleGuideValidator:
                 f"   ❌ Process automatic_install: '{automatic_install_arg}' (should be '%AUTOMATIC_INSTALL%' or omitted)"
             )
         elif automatic_install_arg == "%AUTOMATIC_INSTALL%":
-            print(f"   ✅ Process automatic_install: '%AUTOMATIC_INSTALL%' (legacy pattern)")
+            print(
+                f"   ✅ Process automatic_install: '%AUTOMATIC_INSTALL%' (legacy pattern)"
+            )
         else:
             print(f"   ✅ Process automatic_install: omitted (auto-passed from Input)")
 
@@ -627,7 +632,9 @@ class StyleGuideValidator:
                 "   ✅ FLEET_GITOPS_TEAM_YAML_PATH set to 'teams/workstations.yml' in GitOps recipes"
             )
             print("   ✅ Categories use only supported values (when specified)")
-            print("   ✅ Lowercase Input variables auto-pass or legacy %UPPERCASE% patterns used correctly")
+            print(
+                "   ✅ Lowercase Input variables auto-pass or legacy %UPPERCASE% patterns used correctly"
+            )
             return 0
         elif self.errors:
             print("\n❌ Style guide compliance validation FAILED")

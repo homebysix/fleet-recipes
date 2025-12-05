@@ -23,9 +23,10 @@ Always reference these instructions first and fallback to search or bash command
 ## Working Effectively
 
 ### Bootstrap and Setup (macOS required for AutoPkg)
-- Install Python dependencies for development (code formatting/linting):
+- Install pre-commit for automated code style validation:
   - `python3 -m pip install --upgrade pip`
-  - `python3 -m pip install black isort flake8 flake8-bugbear` -- takes 10-30 seconds. NEVER CANCEL.
+  - `python3 -m pip install pre-commit` -- takes 10-30 seconds. NEVER CANCEL.
+  - `pre-commit install` -- installs git hooks
   - Note: The processor uses only native Python libraries available in AutoPkg's bundled Python (no external dependencies required for runtime)
 - Install AutoPkg (macOS only):
   - Download the latest release from https://github.com/autopkg/autopkg/releases/latest
@@ -37,10 +38,7 @@ Always reference these instructions first and fallback to search or bash command
   - `autopkg repo-add https://github.com/autopkg/homebysix-recipes.git` -- takes 30-60 seconds. NEVER CANCEL.
   - Note: This repository contains its own FleetImporter processor, so no additional repo is needed for Fleet integration
 - Validate Python syntax and code style:
-  - `python3 -m py_compile FleetImporter/FleetImporter.py` -- takes < 1 second.
-  - `python3 -m black --check FleetImporter/FleetImporter.py` -- takes < 1 second.
-  - `python3 -m isort --check-only FleetImporter/FleetImporter.py` -- takes < 1 second.
-  - `python3 -m flake8 FleetImporter/FleetImporter.py` -- takes < 1 second.
+  - `pre-commit run --all-files` -- runs all code style checks (black, isort, flake8, recipe validation)
 
 ### Critical macOS Setup Notes
 - AutoPkg ONLY works on macOS. Do not attempt to install on Linux/Windows.
@@ -71,44 +69,40 @@ Always reference these instructions first and fallback to search or bash command
 
 ### File Validation
 - Always validate YAML syntax when modifying recipe files
-- Check Python syntax with `python3 -m py_compile FleetImporter/FleetImporter.py` before committing
+- Run `pre-commit run --all-files` before committing to validate all code style and recipe requirements
+- Pre-commit automatically runs on `git commit`, catching issues before they're committed
 - Test environment variable substitution in recipes
 - **ALWAYS write recipes in YAML format, not XML** - This repository uses YAML recipes exclusively
 
 ### Runtime Dependencies
 - **The FleetImporter processor uses ONLY native Python libraries** - no external pip packages required at runtime
 - AutoPkg's bundled Python 3.10+ includes all necessary modules: `urllib`, `json`, `yaml`, `hashlib`, etc.
-- Development dependencies (black, isort, flake8) are only needed for code formatting/linting, not for running recipes
+- Development dependency (pre-commit) manages black, isort, flake8 automatically - no manual installation needed
 
 ## AutoPkg Code Style Requirements
 
-This project follows AutoPkg's strict code style requirements. ALL Python code must pass these three checks before being committed:
+This project follows AutoPkg's strict code style requirements. ALL Python code must pass these checks before being committed:
 
-### 1. Black Formatting
-- Run: `python3 -m black --check --diff FleetImporter.py`
-- Fix: `python3 -m black FleetImporter.py`
-- Purpose: Consistent code formatting across the AutoPkg ecosystem
+### Pre-Commit Hooks (Automated)
+The repository uses pre-commit hooks to automatically validate code style on every commit:
+- **Black**: Consistent code formatting across the AutoPkg ecosystem
+- **isort**: Standardized import organization
+- **Flake8 with Bugbear**: Code quality, unused variables, style violations
+- **AutoPkg Recipe Validation**: Ensures recipes follow the style guide
 
-### 2. Import Sorting (isort)
-- Run: `python3 -m isort --check-only --diff FleetImporter.py`
-- Fix: `python3 -m isort FleetImporter.py`
-- Purpose: Standardized import organization
+### Usage
+- **Automatic**: Hooks run on every `git commit`
+- **Manual validation**: `pre-commit run --all-files`
+- **Fix formatting issues**: Pre-commit will auto-fix black and isort issues; just review and re-stage the changes
+- **Configuration**: Uses `.flake8` and `.pre-commit-config.yaml` for project-specific settings
 
-### 3. Flake8 with Bugbear
-- Run: `python3 -m flake8 FleetImporter.py`
-- Purpose: Code quality, unused variables, style violations
-- Configuration: Uses `.flake8` file for project-specific settings
-
-**CRITICAL**: All three tools must pass without errors before any code can be contributed to AutoPkg repositories. This is a hard requirement of the AutoPkg project.
+**CRITICAL**: All tools must pass without errors before any code can be contributed to AutoPkg repositories. This is a hard requirement of the AutoPkg project.
 
 ## Validation Scenarios
 
 ### After Making Code Changes
 - ALWAYS run AutoPkg code style requirements (required by AutoPkg project):
-  - `python3 -m py_compile FleetImporter/FleetImporter.py` -- validate syntax
-  - `python3 -m black --check --diff FleetImporter/FleetImporter.py` -- check formatting
-  - `python3 -m isort --check-only --diff FleetImporter/FleetImporter.py` -- check import sorting
-  - `python3 -m flake8 FleetImporter/FleetImporter.py` -- check linting with bugbear
+  - `pre-commit run --all-files` -- validates syntax, formatting, imports, and linting
 - Test YAML parsing: `python3 -c "import yaml; [yaml.safe_load(open(f)) for f in ['GitHub/GithubDesktop.fleet.direct.recipe.yaml', 'GitHub/GithubDesktop.fleet.gitops.recipe.yaml', 'Anthropic/Claude.fleet.direct.recipe.yaml']]"`
 - Validate Git operations work correctly
 - If modifying the processor, test with a sample recipe using autopkg (requires macOS)
