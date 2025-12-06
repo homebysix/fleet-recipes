@@ -69,7 +69,6 @@ Always reference these instructions first and fallback to search or bash command
 
 ### File Validation
 - Always validate YAML syntax when modifying recipe files
-- Run `pre-commit run --all-files` before committing to validate all code style and recipe requirements
 - Pre-commit automatically runs on `git commit`, catching issues before they're committed
 - Test environment variable substitution in recipes
 - **ALWAYS write recipes in YAML format, not XML** - This repository uses YAML recipes exclusively
@@ -79,9 +78,9 @@ Always reference these instructions first and fallback to search or bash command
 - AutoPkg's bundled Python 3.10+ includes all necessary modules: `urllib`, `json`, `yaml`, `hashlib`, etc.
 - Development dependency (pre-commit) manages black, isort, flake8 automatically - no manual installation needed
 
-## AutoPkg Code Style Requirements
+## Code Style Requirements
 
-This project follows AutoPkg's strict code style requirements. ALL Python code must pass these checks before being committed:
+ALL Python code must pass these checks before being committed:
 
 ### Pre-Commit Hooks (Automated)
 The repository uses pre-commit hooks to automatically validate code style on every commit:
@@ -96,7 +95,7 @@ The repository uses pre-commit hooks to automatically validate code style on eve
 - **Fix formatting issues**: Pre-commit will auto-fix black and isort issues; just review and re-stage the changes
 - **Configuration**: Uses `.flake8` and `.pre-commit-config.yaml` for project-specific settings
 
-**CRITICAL**: All tools must pass without errors before any code can be contributed to AutoPkg repositories. This is a hard requirement of the AutoPkg project.
+**CRITICAL**: All tools must pass without errors before any code can be contributed to this repository. This is a hard requirement of the FleetImporter project.
 
 ## Validation Scenarios
 
