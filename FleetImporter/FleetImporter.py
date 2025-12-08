@@ -452,7 +452,12 @@ class FleetImporter(Processor):
                 finally:
                     # Clean up extracted icon temp directory
                     if extracted_icon_path.parent.exists():
-                        shutil.rmtree(extracted_icon_path.parent, ignore_errors=True)
+                        try:
+                            shutil.rmtree(extracted_icon_path.parent)
+                        except Exception as e:
+                            self.output(
+                                f"Warning: Failed to cleanup icon temp dir: {e}"
+                            )
             else:
                 self.output(
                     "Could not extract icon from package. Skipping icon upload."
@@ -707,11 +712,17 @@ class FleetImporter(Processor):
         finally:
             # Clean up extracted icon temp directory
             if extracted_icon_path and extracted_icon_path.parent.exists():
-                shutil.rmtree(extracted_icon_path.parent, ignore_errors=True)
+                try:
+                    shutil.rmtree(extracted_icon_path.parent)
+                except Exception as e:
+                    self.output(f"Warning: Failed to cleanup icon temp dir: {e}")
             # Always clean up temporary directory
             if temp_dir and Path(temp_dir).exists():
                 self.output(f"Cleaning up temporary directory: {temp_dir}")
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as e:
+                    self.output(f"Warning: Failed to cleanup temp dir: {e}")
 
     # ------------------- helpers -------------------
 
