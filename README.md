@@ -59,7 +59,7 @@ FleetImporter recipes support the following variables. Configuration can be set 
 | `AWS_DEFAULT_REGION` | Not used | Required | `us-east-1` | AWS region for S3 operations |
 | **GitOps Repository** | | | | |
 | `FLEET_GITOPS_REPO_URL` | Not used | Required | - | Git repository URL for Fleet configuration |
-| `FLEET_GITOPS_GITHUB_TOKEN` | Not used | Required | - | GitHub token with repository write permissions |
+| `FLEET_GITOPS_GITHUB_TOKEN` | Not used | Required | - | GitHub token with permissions to push commits and open pull requests (see GitHub token permissions below) |
 | `FLEET_GITOPS_SOFTWARE_DIR` | Not used | Optional | `lib/macos/software` | Directory for software YAML files in GitOps repo |
 | `FLEET_GITOPS_TEAM_YAML_PATH` | Not used | Optional | `teams/workstations.yml` | Path to team YAML file in GitOps repo |
 | **Software Configuration** | | | | |
@@ -143,6 +143,19 @@ defaults write com.github.autopkg AWS_DEFAULT_REGION "us-east-1"
 defaults write com.github.autopkg FLEET_GITOPS_REPO_URL "https://github.com/org/fleet-gitops.git"
 defaults write com.github.autopkg FLEET_GITOPS_GITHUB_TOKEN "your-github-token"
 ```
+
+### GitHub token permissions
+
+`FLEET_GITOPS_GITHUB_TOKEN` must be able to create branches, push commits, and open pull requests in your GitOps repository.
+
+- **Fine-grained personal access token (recommended):**
+  - Repository access: select your GitOps repository
+  - Repository permissions:
+    - **Contents: Read and write**
+    - **Pull requests: Read and write**
+- **Classic personal access token:**
+  - **`repo`** scope (for private repositories)
+  - **`public_repo`** scope can be used if the GitOps repository is public
 
 ### GitOps workflow
 
@@ -352,7 +365,7 @@ All bundle identifiers and versions are automatically escaped to prevent SQL inj
 **GitOps mode issues**
 - Verify AWS credentials are configured
 - Check S3 bucket permissions for upload/delete operations
-- Ensure GitHub token has repository write permissions
+- Ensure GitHub token has the required permissions (`Contents: Read and write`, `Pull requests: Read and write` for fine-grained tokens)
 - Verify GitOps repository URL and paths are correct
 
 **Package upload failures**
